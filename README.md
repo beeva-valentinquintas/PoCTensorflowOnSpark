@@ -35,12 +35,12 @@ Run Tensorflow MNIST over 2 and 3 slaves Spark cluster with GPU computation.
 
 ### Results
 
-| Slaves        | Steps         | Precision  | Price   |   Training time   |
-|:-------------:|:-------------:| :-----:    |:-------:|:-----------------:|
-| 2             | 1000          | 97%        | 0,805 $ |  0:01:04          |
-| 2             | 5000          | 98%        | 0,805 $ |  0:10:27          |
-| 3             | 1000          | 96%        | 1,1 $   |  0:03:23          |
-| 3             | 5000          | 98%        | 1,1 $   |  0:05:59          |
+| Slaves        | Steps         |   Training time   | Cost
+|:-------------:|:-------------:|:-----------------:|:--------:
+| 2             | 5000          |  0:10:27          | 20,56
+| 3             | 5000          |  0:05:59          | 18
+| 2             | 10000         |  0:26:30          | 53
+| 3             | 10000         |  0:14:28          | 43
 
 ### Steps
 
@@ -223,6 +223,81 @@ cd PocTensorFlowOnSpark
 sh tfos.sh destroy
 ```
 
+## Experiment 3
+
+Tensorflow on Spark over RoCE(RDMA Over Converged Ethernet)
+
+Need to recompile kernel to use RoCE soft and then install TensorflowOnSpark over it in order to use RDMA capabilities over Ethernet
+
+1. AMI Creation
+
+RoCE installation instructions can be found [here](https://github.com/beeva-mariorodriguez/rdma_over_ethernet). Next steps must be followed over generated AMI. An example of this first AMI can be found in Oregon region with id ami-b2930dd2
+
+Create AMI following [instructions](https://github.com/yahoo/TensorFlowOnSpark/wiki/Create_AMI)
+
+Note: Need specify rdma to the [bazel build command](https://github.com/yahoo/tensorflow/blob/jun_r1.0/tensorflow/core/distributed_runtime/rdma/README.md)
+
+Note 2: You need to enable root access to ec2 instance
+
+Note 3: Copy generated tensorflow-hadoop-1.0-SNAPSHOT.jar to ${TFoS_HOME}
+
+An example of final ami can be found in Oregon region with id ami-a5afc8c5
+
+1. Run cluster
+```
+cd PocTensorFlowOnSpark
+sh runEc2Tensorflow.sh
+export EC2_PEM_FILE=path/to/.pem
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${EC2_PEM_FILE} root@<SPARK_MASTER_HOST>
+```
+
+2. Convert MNIST files into TensorFlow Record format
+
+```
+pushd ${TFoS_HOME}
+spark-submit --master local[4] \
+--jars ${TFoS_HOME}/tensorflow-hadoop-1.0-SNAPSHOT.jar \
+--conf spark.executorEnv.LD_LIBRARY_PATH="/usr/local/cuda/lib64" \
+--driver-library-path="/usr/local/cuda/lib64" \
+${TFoS_HOME}/examples/mnist/mnist_data_setup.py \
+--output mnist/tfr \
+--format tfr
+popd
+hadoop fs -ls mnist/tfr
+```
+
+3. Train a MNIST model
+```
+pushd ${TFoS_HOME}/src
+zip -r ${TFoS_HOME}/tfspark.zip *
+popd
+
+export NUM_GPU=1
+export CORES_PER_WORKER=4
+
+export SPARK_WORKER_INSTANCES=2
+export TOTAL_CORES=$((${CORES_PER_WORKER}*${SPARK_WORKER_INSTANCES}))
+export MASTER=spark://$(hostname):7077
+
+spark-submit --master ${MASTER} \
+--conf spark.cores.max=${TOTAL_CORES} \
+--conf spark.task.cpus=${CORES_PER_WORKER} \
+--py-files ${TFoS_HOME}/tfspark.zip,${TFoS_HOME}/examples/mnist/tf/mnist_dist.py \
+--conf spark.executorEnv.LD_LIBRARY_PATH="/usr/local/cuda/lib64:$JAVA_HOME/jre/lib/amd64/server:$HADOOP_HOME/lib/native" \
+--conf spark.executorEnv.JAVA_HOME="$JAVA_HOME" \
+--conf spark.executorEnv.HADOOP_HDFS_HOME=${HADOOP_HOME} \
+--conf spark.executorEnv.CLASSPATH=$($HADOOP_HOME/bin/hadoop classpath --glob) \
+--driver-library-path="/usr/local/cuda/lib64" \
+${TFoS_HOME}/examples/mnist/tf/mnist_spark.py \
+--cluster_size ${SPARK_WORKER_INSTANCES} \
+--images mnist/tfr/train --format tfr \
+--steps 10000 \
+--mode train --model mnist_model --tensorboard \
+--rdma True
+```
+
+<b>This experiment failed with unknown errors<b>
+
 ##  Good to know
 
 ### CUDA drivers problem
@@ -238,8 +313,11 @@ A new ami has been created in Oregon region with nvidia library updated, we reco
 
 ### Others
 
-Output logs can be found in every slave on spark/work/
+* Output logs can be found in every slave on spark/work/
 
-TensorBoard port change every execution, you may need to change security group rules to access.
+* TensorBoard port change every execution, you may need to change security group rules to access.
 
-The limit of AWS p2 instances per region is 1, you may need to request an update
+* The limit of AWS p2 instances per region is 1, you may need to request an update
+
+* In case there is any problem with "Please login as the user "ubuntu" rather than the user "root"." when running cluster you need to edit /root/.ssh/authorized_keys and /etc/ssh/sshd_config in ec2 in order to allow root access
+
